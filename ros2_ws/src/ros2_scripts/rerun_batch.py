@@ -4,7 +4,11 @@ import rerun as rr
 import argparse
 
 import numpy as np
-from collections import deque
+# from collections import deque
+
+from xacrodoc import XacroDoc
+from pytransform3d.urdf import UrdfTransformManager
+from scipy.spatial.transform import Rotation
 
 SCRIPT_DESCRIPTION=\
 """This script allows the visualization of large mcap files in rerun by reading them sequentially
@@ -74,16 +78,96 @@ def log_imu(decoded_msg, channel, options):
     # options['imu_angular_velocity'].append(decoded_msg.angular_velocity)
     # options['imu_linear_acceleration'].append(decoded_msg.linear_acceleration) 
         
+    # rr.log(
+    #     channel.topic + "/angular_velocity",
+    #     rr.Arrows3D(
+    #         vectors=[
+    #             decoded_msg.angular_velocity.x,
+    #             decoded_msg.angular_velocity.y,
+    #             decoded_msg.angular_velocity.z,
+    #         ],
+    #         labels="Angular velocity"
+    #     )
+    # )
+
+    match channel.topic:
+        case "/reach_1/imu":
+            t_baselink_imu = options['t/reach_imu1']
+            q_baselink_imu = options['q/reach_imu1']
+        case "/reach_2/imu":
+            t_baselink_imu = options['t/reach_imu2']
+            q_baselink_imu = options['q/reach_imu2']
+        case "/reach_3/imu":
+            t_baselink_imu = options['t/reach_imu3']
+            q_baselink_imu = options['q/reach_imu3']
+        case _:
+            return
+
     rr.log(
-        "imu/angular_velocity",
-        rr.Scalars(
-            
+        channel.topic + "/linear_acceleration",
+        rr.InstancePoses3D(
+            translations=[t_baselink_imu],
+            quaternions=[q_baselink_imu],
+        )
+    )
+    
+    x = decoded_msg.linear_acceleration.x
+    y = decoded_msg.linear_acceleration.y
+    z = decoded_msg.linear_acceleration.z
+    vector = [x,y,z]
+    # match channel.topic:
+    #     case "/reach_1/imu":
+    #         vector = [-x, -y, z]
+    #     case "/reach_2/imu":
+    #         vector = [-y, -z, x]
+    #     case "/reach_3/imu":
+    #         vector = [z, y, -x]
+    rr.log(
+        channel.topic + "/linear_acceleration",
+        rr.Arrows3D(
+            vectors=vector,
+            origins=[0,0,0],
+            labels="Linear acceleration"
+        )
+    )
+
+'''
+Odometry(header=Header(stamp=Time(sec=1703261657, nanosec=72322130), frame_id=odom), child_frame_id=base_link, pose=PoseWithCovariance(pose=Pose(position=Point(x=0.9392949656992101, y=0.0019499297575358407, z=0.0), orientation=Quaternion(x=0.0, y=0.0, z=0.0016485533262805495, w=0.999998641135042)), covariance=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), twist=TwistWithCovariance(twist=Twist(linear=Vector3(x=0.0, y=0.0, z=0.0), angular=Vector3(x=0.0, y=0.0, z=0.0)), covariance=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+'''
+def log_odometry(decoded_msg, channel):
+    pos = decoded_msg.pose.pose.position
+    ori = decoded_msg.pose.pose.orientation
+
+    rr.log(
+        channel.topic + "/path",
+        rr.Points3D(
+            [[pos.x, pos.y, pos.z]],
+            radii=rr.Radius.ui_points(5.0),
+            colors=[[0, 255, 0]]
         )
     )
     rr.log(
-        "imu/linear_acceleration",
-        rr.Scalars()
+        channel.topic + "/linear",
+        rr.InstancePoses3D(
+            translations=[[pos.x, pos.y, pos.z]],
+            quaternions=[[ori.x, ori.y, ori.z, ori.w]]
+        )
     )
+    rr.log(
+        channel.topic + "/linear",
+        rr.Arrows3D(
+            vectors=[
+                decoded_msg.twist.twist.linear.x,
+                decoded_msg.twist.twist.linear.y,
+                decoded_msg.twist.twist.linear.z,
+            ],
+            origins=[0.0,0.0,0.0],
+            labels="Linear acceleration"
+        )
+    )
+
+def update_transforms(decoded_msg, options):
+    print(decoded_msg)
 
 def set_time(options, decoded_msg, msg):
     time = msg.log_time
@@ -114,9 +198,21 @@ def stream_mcap(mcap_path: Path, options):
         options['time_diff'] = options['final_time'] - options['initial_time']
 
         # persist imu values to display them all in a 'window'
-        options['imu_orientation'] = deque(maxlen=1000)
-        options['imu_angular_velocity'] = deque(maxlen=1000)
-        options['imu_linear_acceleration'] = deque(maxlen=1000)
+        # options['imu_orientation'] = deque(maxlen=1000)
+        # options['imu_angular_velocity'] = deque(maxlen=1000)
+        # options['imu_linear_acceleration'] = deque(maxlen=1000)
+
+        doc = XacroDoc.from_file("../../../data/config/rosario_v2.urdf.xacro")
+        urdf_str = doc.to_urdf_string()
+        utm = UrdfTransformManager()
+        utm.load_urdf(urdf_str)
+
+        for imu in ["reach_imu1", "reach_imu2", "reach_imu3"]:
+            T_baselink_imu = utm.get_transform(imu, "base_link")
+            t_baselink_imu = T_baselink_imu[0:3, 3]
+            q_baselink_imu = Rotation.from_matrix(T_baselink_imu[0:3, 0:3]).as_quat()
+            options["t/" + imu] = t_baselink_imu
+            options["q/" + imu] = q_baselink_imu
 
         for schema, channel, msg, decoded_msg in reader.iter_decoded_messages():
             if schema is None: continue
@@ -128,18 +224,20 @@ def stream_mcap(mcap_path: Path, options):
                 case "sensor_msgs/msg/NavSatFix":
                     set_time(options, decoded_msg, msg)
                     log_gnss(decoded_msg, channel)
-                # case "sensor_msgs/msg/Imu":
-                #     log_imu(decoded_msg, channel, options)
+                case "sensor_msgs/msg/Imu":
+                    log_imu(decoded_msg, channel, options)
+                case "nav_msgs/msg/Odometry":
+                    log_odometry(decoded_msg, channel)
                 case _:
                     continue
 
             message_count += 1
-            if message_count % 1000 == 0:
+            if message_count % 10000 == 0:
                 elapsed = time.time() - start_time
                 print(f"Streamed {message_count} messages... ({elapsed:.2f}s elapsed)")
-                if not play_all and message_count % 5000 == 0:
+                if not play_all and message_count % 20000 == 0:
                     res = input("Stream paused. Do you want to continue? (q/Q to quit) ")
-                    if res.lower() == "q":
+                    if res.strip().lower() == "q":
                         break
 
 
