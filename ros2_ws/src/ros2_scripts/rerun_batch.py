@@ -114,20 +114,43 @@ def log_imu(decoded_msg, channel, options):
     x = decoded_msg.linear_acceleration.x
     y = decoded_msg.linear_acceleration.y
     z = decoded_msg.linear_acceleration.z
-    vector = [x,y,z]
-    # match channel.topic:
-    #     case "/reach_1/imu":
-    #         vector = [-x, -y, z]
-    #     case "/reach_2/imu":
-    #         vector = [-y, -z, x]
-    #     case "/reach_3/imu":
-    #         vector = [z, y, -x]
+    vector = np.array([x,y,z])
     rr.log(
         channel.topic + "/linear_acceleration",
         rr.Arrows3D(
             vectors=vector,
             origins=[0,0,0],
             labels="Linear acceleration"
+        )
+    )
+    
+    # rr.log(
+    #     channel.topic + "/stats",
+    #     rr.InstancePoses3D(
+    #         translations=[t_baselink_imu],
+    #         quaternions=[q_baselink_imu],
+    #     )
+    # )
+
+    # rotate vector
+    quat = Rotation.from_quat(q_baselink_imu)
+    v_rot = quat.apply(vector)
+    rr.log(
+        channel.topic + "/stats/x",
+        rr.Scalars(
+            scalars=[v_rot[0]]
+        )
+    )
+    rr.log(
+        channel.topic + "/stats/y",
+        rr.Scalars(
+            scalars=[v_rot[1]]
+        )
+    )
+    rr.log(
+        channel.topic + "/stats/z",
+        rr.Scalars(
+            scalars=[v_rot[2]]
         )
     )
 
@@ -166,9 +189,6 @@ def log_odometry(decoded_msg, channel):
         )
     )
 
-def update_transforms(decoded_msg, options):
-    print(decoded_msg)
-
 def set_time(options, decoded_msg, msg):
     time = msg.log_time
     if options['header_timestamp'] and hasattr(msg, 'header'):
@@ -197,11 +217,6 @@ def stream_mcap(mcap_path: Path, options):
         options['final_time'] = reader.get_summary().statistics.message_end_time
         options['time_diff'] = options['final_time'] - options['initial_time']
 
-        # persist imu values to display them all in a 'window'
-        # options['imu_orientation'] = deque(maxlen=1000)
-        # options['imu_angular_velocity'] = deque(maxlen=1000)
-        # options['imu_linear_acceleration'] = deque(maxlen=1000)
-
         doc = XacroDoc.from_file("../../../data/config/rosario_v2.urdf.xacro")
         urdf_str = doc.to_urdf_string()
         utm = UrdfTransformManager()
@@ -214,15 +229,22 @@ def stream_mcap(mcap_path: Path, options):
             options["t/" + imu] = t_baselink_imu
             options["q/" + imu] = q_baselink_imu
 
+        for imu in ["/reach_1/imu/stats", "/reach_2/imu/stats", "/reach_3/imu/stats"]:
+            for (val, color) in [("/x", [200,50,0]), ("/y",[0,200,75]), ("/z",[0,75,220])]:
+                rr.log(
+                    imu + val,
+                    rr.SeriesLines(colors=color),
+                    static=True
+                )
+
         for schema, channel, msg, decoded_msg in reader.iter_decoded_messages():
             if schema is None: continue
 
+            set_time(options, decoded_msg, msg)
             match schema.name:
                 case "sensor_msgs/msg/Image":
-                    set_time(options, decoded_msg, msg)
                     log_image(decoded_msg, channel)
                 case "sensor_msgs/msg/NavSatFix":
-                    set_time(options, decoded_msg, msg)
                     log_gnss(decoded_msg, channel)
                 case "sensor_msgs/msg/Imu":
                     log_imu(decoded_msg, channel, options)
