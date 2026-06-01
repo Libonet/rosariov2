@@ -45,7 +45,7 @@ def log_image(decoded_msg, channel):
                 principal_point=[648.7339, 349.0376]
             )
         )
-        rr.log(channel.topic + '/image', rr.DepthImage(img_tensor))
+        rr.log(channel.topic + '/image', rr.DepthImage(img_tensor, meter=1000))
     else:
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint8)
         if encoding in ("rgb8", "bgr8"):
@@ -84,18 +84,21 @@ def log_gnss(decoded_msg, channel):
 
     # Color = i32 RGBA. Blue (R=0, G=0, B=255, A=255)
     # Hex = 0x0000FFFF
+
     color_scheme = {
-        '/reach_1/fix': 0xFF0000FF,
-        '/reach_2/fix': 0x00FF00FF,
-        '/reach_3/fix': 0x0000FFFF,
+        -1: [100, 100, 100], # gray
+        0: [255, 0, 0], # red
+        1: [0,0,255], # blue
+        2: [0,255,0], # green
     }
 
+    status = decoded_msg.status.status
     rr.log(
         "/reach" + channel.topic,
         rr.GeoPoints(
             lat_lon=latlon,
             radii=rr.Radius.ui_points(5.0),
-            colors=[color_scheme[channel.topic]],
+            colors=[color_scheme[status]],
         )
     )
 
