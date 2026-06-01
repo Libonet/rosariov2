@@ -22,30 +22,59 @@ SCRIPT_DESCRIPTION=\
 #     )
 # )
 
+rgb_image_count = 0
+depth_image_count = 0
 def log_image(decoded_msg, channel):
+    global rgb_image_count
+    global depth_image_count
+
     height = decoded_msg.height
     width = decoded_msg.width
     encoding = decoded_msg.encoding
 
     if encoding == "16UC1":
+        depth_image_count += 1
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint16)
         img_tensor = raw_data.reshape((height, width))
 
-        rr.log(channel.topic, rr.DepthImage(img_tensor))
+        rr.log(
+            channel.topic,
+            rr.Pinhole(
+                resolution=[1280, 720],
+                focal_length=[645.4064, 648.5756],
+                principal_point=[648.7339, 349.0376]
+            )
+        )
+        rr.log(channel.topic + '/image', rr.DepthImage(img_tensor))
     else:
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint8)
         if encoding in ("rgb8", "bgr8"):
+            rgb_image_count += 1
             img_tensor = raw_data.reshape((height, width, 3))
 
             if encoding == "bgr8":
                 img_tensor = img_tensor[:, :, ::-1]
+
+            rr.log(
+                channel.topic,
+                rr.Pinhole(
+                    resolution=[1280, 720],
+                    focal_length=[890.4202, 895.5269],
+                    principal_point=[633.5761, 375.3947]
+                )
+            )
+            rr.log(channel.topic + '/image', rr.Image(img_tensor))
         elif encoding in ("mono8", "8UC1"):
             img_tensor = raw_data.reshape((height, width))
+            rr.log(channel.topic + '/image', rr.Image(img_tensor))
         else:
             return
 
-        rr.log(channel.topic, rr.Image(img_tensor))
 
+    rr.log(
+        "stats/image_loss",
+        rr.Scalars(scalars=[abs(rgb_image_count - depth_image_count)])
+    )
 
 def log_gnss(decoded_msg, channel):
     latlon = [decoded_msg.latitude,decoded_msg.longitude]
@@ -204,6 +233,7 @@ def stream_mcap(mcap_path: Path, options):
     from mcap_ros2.decoder import DecoderFactory
     rr.init("batch_example")
     rr.spawn(memory_limit=options['memory_limit'])
+    # rr.send_blueprint(blueprint=options['initial_blueprint'])
     
     print(f"Opening {mcap_path} for sequential streaming");
 
@@ -312,6 +342,10 @@ if __name__ == '__main__':
         '--header_timestamp', action='store_true',
         help='Use the message timestamp information instead of the log time in Ros'
     )
+    parser.add_argument(
+        '-V', '--initial_blueprint', type=Path, required=False, default='./batch_blueprint.rbl',
+        help='Initial view to start the recording'
+    )
 
     args = parser.parse_args()
 
@@ -320,6 +354,7 @@ if __name__ == '__main__':
     options['memory_limit'] = args.memory_limit
     options['play_all'] = args.play_all
     options['header_timestamp'] = args.header_timestamp
+    options['initial_blueprint'] = args.initial_blueprint
 
     stream_mcap(args.bag_path, options)
     # stream_mcap_with_rerun(args.bag_path, options)
