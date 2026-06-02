@@ -268,7 +268,7 @@ def stream_mcap(mcap_path: Path, options):
         options['final_time'] = reader.get_summary().statistics.message_end_time
         options['time_diff'] = options['final_time'] - options['initial_time']
 
-        doc = XacroDoc.from_file("../../../data/config/rosario_v2.urdf.xacro")
+        doc = XacroDoc.from_file(options['urdf'])
         urdf_str = doc.to_urdf_string()
         utm = UrdfTransformManager()
         utm.load_urdf(urdf_str)
@@ -383,9 +383,13 @@ if __name__ == '__main__':
         '--header_timestamp', action='store_true',
         help='Use the message timestamp information instead of the log time in Ros'
     )
+    # parser.add_argument(
+    #     '-V', '--initial_blueprint', type=Path, required=False, default='./batch_blueprint.rbl',
+    #     help='Initial view to start the recording'
+    # )
     parser.add_argument(
-        '-V', '--initial_blueprint', type=Path, required=False, default='./batch_blueprint.rbl',
-        help='Initial view to start the recording'
+        '--urdf', type=Path, required=False, default='../../../data/config/rosario_v2.urdf.xacro',
+        help='URDF file to use for the transforms'
     )
 
     args = parser.parse_args()
@@ -395,7 +399,8 @@ if __name__ == '__main__':
     options['memory_limit'] = args.memory_limit
     options['play_all'] = args.play_all
     options['header_timestamp'] = args.header_timestamp
-    options['initial_blueprint'] = args.initial_blueprint
+    # options['initial_blueprint'] = args.initial_blueprint
+    options['urdf'] = args.urdf
 
     stream_mcap(args.bag_path, options)
     # stream_mcap_with_rerun(args.bag_path, options)
