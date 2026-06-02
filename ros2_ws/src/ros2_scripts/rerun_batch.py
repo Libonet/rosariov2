@@ -64,7 +64,7 @@ def log_image(decoded_msg, channel):
         (fps, time) = get_time_diff(decoded_msg, curr_depth_time)
         curr_depth_time = time
 
-        rr.log('/fps/depth', rr.Scalars(scalars=[fps]))
+        rr.log('/stats/fps/depth', rr.Scalars(scalars=[fps]))
     else:
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint8)
         if encoding in ("rgb8", "bgr8"):
@@ -81,7 +81,7 @@ def log_image(decoded_msg, channel):
             (fps, time) = get_time_diff(decoded_msg, curr_rgb_time)
             curr_rgb_time = time
 
-            rr.log('/fps/color', rr.Scalars(scalars=[fps]))
+            rr.log('/stats/fps/color', rr.Scalars(scalars=[fps]))
         elif encoding in ("mono8", "8UC1"):
             img_tensor = raw_data.reshape((height, width))
             rr.log(channel.topic + '/image', rr.Image(img_tensor))
