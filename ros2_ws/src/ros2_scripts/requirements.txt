@@ -4,3 +4,4 @@ mcap-ros2-support
 numpy
 xacrodoc
 pytransform3d
+opencv-python

@@ -4,11 +4,12 @@ import rerun as rr
 import argparse
 
 import numpy as np
-# from collections import deque
 
 from xacrodoc import XacroDoc
 from pytransform3d.urdf import UrdfTransformManager
 from scipy.spatial.transform import Rotation
+
+import cv2
 
 SCRIPT_DESCRIPTION=\
 """This script allows the visualization of large mcap files in rerun by reading them sequentially
@@ -22,6 +23,18 @@ SCRIPT_DESCRIPTION=\
 #     )
 # )
 
+def get_time_diff(decoded_msg, curr_time: float | None) -> tuple[float, float]:
+    if curr_time is None:
+        curr_time = decoded_msg.header.stamp.sec + decoded_msg.header.stamp.nanosec * 1e-9
+        return (0, curr_time)
+    else:
+        last_time: float = curr_time
+        curr_time: float = decoded_msg.header.stamp.sec + decoded_msg.header.stamp.nanosec * 1e-9
+        elapsed: float = curr_time - last_time
+        return (1/elapsed, curr_time)
+
+curr_rgb_time = None
+curr_depth_time = None
 rgb_image_count = 0
 depth_image_count = 0
 def log_image(decoded_msg, channel):
@@ -37,33 +50,38 @@ def log_image(decoded_msg, channel):
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint16)
         img_tensor = raw_data.reshape((height, width))
 
-        rr.log(
-            channel.topic,
-            rr.Pinhole(
-                resolution=[1280, 720],
-                focal_length=[645.4064, 648.5756],
-                principal_point=[648.7339, 349.0376]
-            )
-        )
+        # Downsampling
+        width = int(width / 4)
+        height = int(height / 4)
+        dim = (width, height)
+
+        img_tensor = cv2.resize(img_tensor, dim, interpolation=cv2.INTER_NEAREST)
+        
         rr.log(channel.topic + '/image', rr.DepthImage(img_tensor, meter=1000))
+
+        # Log FPS
+        global curr_depth_time
+        (fps, time) = get_time_diff(decoded_msg, curr_depth_time)
+        curr_depth_time = time
+
+        rr.log('/fps/depth', rr.Scalars(scalars=[fps]))
     else:
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint8)
         if encoding in ("rgb8", "bgr8"):
+            global curr_rgb_time
             rgb_image_count += 1
             img_tensor = raw_data.reshape((height, width, 3))
 
             if encoding == "bgr8":
                 img_tensor = img_tensor[:, :, ::-1]
 
-            rr.log(
-                channel.topic,
-                rr.Pinhole(
-                    resolution=[1280, 720],
-                    focal_length=[890.4202, 895.5269],
-                    principal_point=[633.5761, 375.3947]
-                )
-            )
             rr.log(channel.topic + '/image', rr.Image(img_tensor))
+            
+            # Log FPS
+            (fps, time) = get_time_diff(decoded_msg, curr_rgb_time)
+            curr_rgb_time = time
+
+            rr.log('/fps/color', rr.Scalars(scalars=[fps]))
         elif encoding in ("mono8", "8UC1"):
             img_tensor = raw_data.reshape((height, width))
             rr.log(channel.topic + '/image', rr.Image(img_tensor))
@@ -269,6 +287,26 @@ def stream_mcap(mcap_path: Path, options):
                     rr.SeriesLines(colors=color),
                     static=True
                 )
+
+        rr.log(
+            "/realsense/depth/image_rect_raw",
+            rr.Pinhole(
+                resolution=[1280 / 4, 720 / 4],
+                focal_length=[645.4064 / 4, 648.5756 / 4],
+                principal_point=[648.7339 / 4, 349.0376 / 4]
+            ),
+            static=True
+        )
+
+        rr.log(
+            "/realsense/color/image_raw",
+            rr.Pinhole(
+                resolution=[1280, 720],
+                focal_length=[890.4202, 895.5269],
+                principal_point=[633.5761, 375.3947]
+            ),
+            static=True
+        )
 
         for schema, channel, msg, decoded_msg in reader.iter_decoded_messages():
             if schema is None: continue
