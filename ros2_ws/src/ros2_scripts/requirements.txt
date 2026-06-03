@@ -5,3 +5,4 @@ numpy
 xacrodoc
 pytransform3d
 opencv-python
+trio

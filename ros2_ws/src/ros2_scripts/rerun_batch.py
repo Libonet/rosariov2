@@ -3,6 +3,11 @@ import time
 import rerun as rr
 import argparse
 
+import trio
+import sys
+import termios
+import tty
+
 import numpy as np
 
 from xacrodoc import XacroDoc
@@ -219,7 +224,61 @@ def set_time(options, decoded_msg, msg):
 def to_ns(stamp):
     return stamp.sec * int(1e9) + stamp.nanosec
 
-def stream_mcap(mcap_path: Path, options):
+send_channel, receive_channel = trio.open_memory_channel(10)
+should_exit = False
+
+async def handle_input():
+    print("Handling input. Press q to quit")
+
+    global receive_channel
+    async with receive_channel:
+        async for key in receive_channel:
+            print(f"\r\nLatest key: {key}", flush=True)
+            if key == 'q' or key == 'Q':
+                global should_exit
+                should_exit = True
+                break
+
+    print("\r\nFinish handle_input")
+
+# catches the keys pressed
+def run_listener(trio_token):
+    global send_channel
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    try:
+        tty.setraw(fd)
+        print("Raw mode active. Press any key (q to exit)...", end="", flush=True)
+
+        while True:
+            key = sys.stdin.read(1)
+
+            try:
+                trio.from_thread.run_sync(
+                    send_channel.send_nowait,
+                    key,
+                    trio_token=trio_token
+                )
+            except trio.WouldBlock:
+                print("Would block: ignoring")
+                pass # ignore the input even if we couldn't handle it
+            except trio.RunFinishedError:
+                # Trio loop is done.
+                return False
+
+            try:
+                if key == "q":
+                    break
+            except:
+                pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    print("\r\nFinished listening")
+
+async def stream_mcap(mcap_path: Path, options):
     from mcap.reader import make_reader
     from mcap_ros2.decoder import DecoderFactory
     rr.init("batch_example")
@@ -279,6 +338,10 @@ def stream_mcap(mcap_path: Path, options):
         )
 
         for schema, channel, msg, decoded_msg in reader.iter_decoded_messages():
+            await trio.sleep(0)
+            if should_exit:
+                break
+
             if schema is None: continue
 
             set_time(options, decoded_msg, msg)
@@ -303,7 +366,7 @@ def stream_mcap(mcap_path: Path, options):
                     if res.strip().lower() == "q":
                         break
 
-if __name__ == '__main__':
+async def main():
     parser = argparse.ArgumentParser(description=SCRIPT_DESCRIPTION)
     parser.add_argument(
         '-b', '--bag_path', type=Path, required=True,
@@ -340,5 +403,18 @@ if __name__ == '__main__':
     # options['initial_blueprint'] = args.initial_blueprint
     options['urdf'] = args.urdf
 
-    stream_mcap(args.bag_path, options)
-    # stream_mcap_with_rerun(args.bag_path, options)
+    trio_token = trio.lowlevel.current_trio_token()
+
+    print("Starting stream")
+    async with trio.open_nursery() as nursery:
+        nursery.start_soon(stream_mcap, args.bag_path, options)
+        nursery.start_soon(handle_input)
+
+        await trio.to_thread.run_sync(
+            run_listener, trio_token
+        )
+
+    print("Exiting main")
+
+if __name__ == '__main__':
+    trio.run(main)
