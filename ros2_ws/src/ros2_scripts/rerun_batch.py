@@ -15,14 +15,6 @@ SCRIPT_DESCRIPTION=\
 """This script allows the visualization of large mcap files in rerun by reading them sequentially
 """
 
-# import rerun.blueprint as rrb
-# 
-# blueprint = rrb.Blueprint(
-#     rrb.TimeSeriesView(
-#         origin=
-#     )
-# )
-
 def get_time_diff(decoded_msg, curr_time: float | None) -> tuple[float, float]:
     if curr_time is None:
         curr_time = decoded_msg.header.stamp.sec + decoded_msg.header.stamp.nanosec * 1e-9
@@ -97,15 +89,11 @@ def log_image(decoded_msg, channel):
 def log_gnss(decoded_msg, channel):
     latlon = [decoded_msg.latitude,decoded_msg.longitude]
 
-    # time = decoded_msg.header.stamp.sec * int(1e9) + decoded_msg.header.stamp.nanosec
-    # progress = (time - options['initial_time']) / options['time_diff']
-
     # Color = i32 RGBA. Blue (R=0, G=0, B=255, A=255)
-    # Hex = 0x0000FFFF
-
+    # Opacity can be skipped in array form
     color_scheme = {
-        -1: [100, 100, 100], # gray
-        0: [255, 0, 0], # red
+        -1: [100,100,100], # gray
+        0: [255,0,0], # red
         1: [0,0,255], # blue
         2: [0,255,0], # green
     }
@@ -120,14 +108,7 @@ def log_gnss(decoded_msg, channel):
         )
     )
 
-'''
-Imu(header=Header(stamp=Time(sec=1703261659, nanosec=191286087), frame_id=reach_2_imu), orientation=Quaternion(x=0.568870544, y=-0.418870896, z=-0.578819871, w=-0.407309562), orientation_covariance=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], angular_velocity=Vector3(x=-0.0063853506, y=-0.0117064761, z=0.0117064761), angular_velocity_covariance=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], linear_acceleration=Vector3(x=-9.8569282042175, y=0.181959326171875, z=-0.026336218310752), linear_acceleration_covariance=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-'''
 def log_imu(decoded_msg, channel, options):
-    # options['imu_orientation'].append(decoded_msg.orientation)
-    # options['imu_angular_velocity'].append(decoded_msg.angular_velocity)
-    # options['imu_linear_acceleration'].append(decoded_msg.linear_acceleration) 
-        
     # rr.log(
     #     channel.topic + "/angular_velocity",
     #     rr.Arrows3D(
@@ -174,14 +155,6 @@ def log_imu(decoded_msg, channel, options):
         )
     )
     
-    # rr.log(
-    #     channel.topic + "/stats",
-    #     rr.InstancePoses3D(
-    #         translations=[t_baselink_imu],
-    #         quaternions=[q_baselink_imu],
-    #     )
-    # )
-
     # rotate vector
     quat = Rotation.from_quat(q_baselink_imu)
     v_rot = quat.apply(vector)
@@ -204,9 +177,6 @@ def log_imu(decoded_msg, channel, options):
         )
     )
 
-'''
-Odometry(header=Header(stamp=Time(sec=1703261657, nanosec=72322130), frame_id=odom), child_frame_id=base_link, pose=PoseWithCovariance(pose=Pose(position=Point(x=0.9392949656992101, y=0.0019499297575358407, z=0.0), orientation=Quaternion(x=0.0, y=0.0, z=0.0016485533262805495, w=0.999998641135042)), covariance=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), twist=TwistWithCovariance(twist=Twist(linear=Vector3(x=0.0, y=0.0, z=0.0), angular=Vector3(x=0.0, y=0.0, z=0.0)), covariance=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
-'''
 def log_odometry(decoded_msg, channel):
     pos = decoded_msg.pose.pose.position
     ori = decoded_msg.pose.pose.orientation
@@ -332,38 +302,6 @@ def stream_mcap(mcap_path: Path, options):
                     res = input("Stream paused. Do you want to continue? (q/Q to quit) ")
                     if res.strip().lower() == "q":
                         break
-
-
-def stream_mcap_with_rerun(mcap_path: Path, options):
-    from rerun.experimental import McapReader, send_chunks
-
-    rr.init("batch_example")
-    rr.spawn(memory_limit=options['memory_limit'])
-
-    print(f"Opening {mcap_path} for sequential streaming");
-
-    reader = McapReader(mcap_path)
-
-    message_count = 0
-    start_time = time.time()
-
-    read_iter = reader.stream()
-    for chunk in read_iter:
-        if chunk.entity_path != "/realsense/color/image_raw":
-            # print(chunk.entity_path)
-            continue
-
-        send_chunks(chunk)
-        print("sent chunk of ", chunk.entity_path)
-
-        # print(chunk)
-        # print("num columns =", chunk.num_columns)
-        # print("num rows=", chunk.num_rows)
-
-        message_count += 1
-        if message_count % 10000 == 0:
-            elapsed = time.time() - start_time
-            print(f"Streamed {message_count} messages... ({elapsed:.2f}s elapsed)")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=SCRIPT_DESCRIPTION)
