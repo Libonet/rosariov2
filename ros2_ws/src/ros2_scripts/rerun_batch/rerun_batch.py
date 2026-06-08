@@ -229,18 +229,13 @@ app = {
     "should_exit": False,
     "pause_event": trio.Event(),
     "curr_blueprint": 0,
+    "blueprints": [],
 }
 
 def toggle_blueprint():
-    blueprints = [
-        "./camera_view.rbl",
-        "./pinhole_view.rbl",
-        "./batch_blueprint.rbl",
-    ]
-
     global app
-    app['curr_blueprint'] = (app['curr_blueprint'] + 1) % len(blueprints)
-    rr.log_file_from_path(blueprints[app['curr_blueprint']])
+    app['curr_blueprint'] = (app['curr_blueprint'] + 1) % len(app['blueprints'])
+    rr.log_file_from_path(app['blueprints'][app['curr_blueprint']])
 
 async def handle_input():
     print("\r\nHandling input. Press q to quit")
@@ -307,7 +302,8 @@ async def stream_mcap(mcap_path: Path, options):
     from mcap_ros2.decoder import DecoderFactory
     rr.init("batch_example")
     rr.spawn(memory_limit=options['memory_limit'])
-    # rr.send_blueprint(blueprint=options['initial_blueprint'])
+
+    toggle_blueprint()
     
     print(f"\r\nOpening {mcap_path} for sequential streaming");
 
@@ -419,6 +415,10 @@ async def main():
         '--urdf', type=Path, required=False, default='../../../../data/config/rosario_v2.urdf.xacro',
         help='URDF file to use for the transforms'
     )
+    parser.add_argument(
+        '--blueprints', type=Path, required=False, default='./blueprints',
+        help='Path to blueprints to toggle between'
+    )
 
     args = parser.parse_args()
 
@@ -429,6 +429,9 @@ async def main():
     options['header_timestamp'] = args.header_timestamp
     # options['initial_blueprint'] = args.initial_blueprint
     options['urdf'] = args.urdf
+
+    global app
+    app['blueprints'] = [str(file) for file in args.blueprints.iterdir() if file.is_file()]
 
     trio_token = trio.lowlevel.current_trio_token()
 
