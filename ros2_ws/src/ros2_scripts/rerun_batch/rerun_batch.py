@@ -30,20 +30,22 @@ def get_time_diff(decoded_msg, curr_time: float | None) -> tuple[float, float]:
         elapsed: float = curr_time - last_time
         return (1/elapsed, curr_time)
 
-curr_rgb_time = None
-curr_depth_time = None
-rgb_image_count = 0
-depth_image_count = 0
+
+image_stats = {
+    "curr_rgb_time": 0.0,
+    "curr_depth_time": 0.0,
+    "rgb_image_count": 0,
+    "depth_image_count": 0,
+}
 def log_image(decoded_msg, channel):
-    global rgb_image_count
-    global depth_image_count
+    global image_stats
 
     height = decoded_msg.height
     width = decoded_msg.width
     encoding = decoded_msg.encoding
 
     if encoding == "16UC1":
-        depth_image_count += 1
+        image_stats["depth_image_count"] += 1
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint16)
         img_tensor = raw_data.reshape((height, width))
 
@@ -57,16 +59,14 @@ def log_image(decoded_msg, channel):
         rr.log(channel.topic + '/image', rr.DepthImage(img_tensor, meter=1000))
 
         # Log FPS
-        global curr_depth_time
-        (fps, time) = get_time_diff(decoded_msg, curr_depth_time)
-        curr_depth_time = time
+        (fps, time) = get_time_diff(decoded_msg, image_stats['curr_depth_time'])
+        image_stats['curr_depth_time'] = time
 
         rr.log('/stats/fps/depth', rr.Scalars(scalars=[fps]))
     else:
         raw_data = np.frombuffer(decoded_msg.data, dtype=np.uint8)
         if encoding in ("rgb8", "bgr8"):
-            global curr_rgb_time
-            rgb_image_count += 1
+            image_stats['rgb_image_count'] += 1
             img_tensor = raw_data.reshape((height, width, 3))
 
             if encoding == "bgr8":
@@ -75,8 +75,8 @@ def log_image(decoded_msg, channel):
             rr.log(channel.topic + '/image', rr.Image(img_tensor))
             
             # Log FPS
-            (fps, time) = get_time_diff(decoded_msg, curr_rgb_time)
-            curr_rgb_time = time
+            (fps, time) = get_time_diff(decoded_msg, image_stats['curr_rgb_time'])
+            image_stats['curr_rgb_time'] = time
 
             rr.log('/stats/fps/color', rr.Scalars(scalars=[fps]))
         elif encoding in ("mono8", "8UC1"):
@@ -88,7 +88,7 @@ def log_image(decoded_msg, channel):
 
     rr.log(
         "stats/image_loss",
-        rr.Scalars(scalars=[abs(rgb_image_count - depth_image_count)])
+        rr.Scalars(scalars=[abs(image_stats['rgb_image_count'] - image_stats['depth_image_count'])])
     )
 
 def log_gnss(decoded_msg, channel):
@@ -225,19 +225,43 @@ def to_ns(stamp):
     return stamp.sec * int(1e9) + stamp.nanosec
 
 send_channel, receive_channel = trio.open_memory_channel(10)
-should_exit = False
+app = {
+    "should_exit": False,
+    "pause_event": trio.Event(),
+    "curr_blueprint": 0,
+}
+
+def toggle_blueprint():
+    blueprints = [
+        "./camera_view.rbl",
+        "./pinhole_view.rbl",
+        "./batch_blueprint.rbl",
+    ]
+
+    global app
+    app['curr_blueprint'] = (app['curr_blueprint'] + 1) % len(blueprints)
+    rr.log_file_from_path(blueprints[app['curr_blueprint']])
 
 async def handle_input():
-    print("Handling input. Press q to quit")
+    print("\r\nHandling input. Press q to quit")
 
+    global app
+    app['pause_event'].set()
     global receive_channel
     async with receive_channel:
         async for key in receive_channel:
-            print(f"\r\nLatest key: {key}", flush=True)
-            if key == 'q' or key == 'Q':
-                global should_exit
-                should_exit = True
+            print(f"\r\nLatest key: {key}\r\n")
+            if key == 'q':
+                app['should_exit'] = True
+                app['pause_event'].set()
                 break
+            if key == 'p':
+                if app['pause_event'].is_set():
+                    app['pause_event'] = trio.Event()
+                else:
+                    app['pause_event'].set()
+            if key == 'c':
+                toggle_blueprint()
 
     print("\r\nFinish handle_input")
 
@@ -250,7 +274,7 @@ def run_listener(trio_token):
 
     try:
         tty.setraw(fd)
-        print("Raw mode active. Press any key (q to exit)...", end="", flush=True)
+        # print("Raw mode active. Press any key (q to exit)...", end="", flush=True)
 
         while True:
             key = sys.stdin.read(1)
@@ -262,7 +286,7 @@ def run_listener(trio_token):
                     trio_token=trio_token
                 )
             except trio.WouldBlock:
-                print("Would block: ignoring")
+                print("\r\nWould block: ignoring")
                 pass # ignore the input even if we couldn't handle it
             except trio.RunFinishedError:
                 # Trio loop is done.
@@ -285,11 +309,11 @@ async def stream_mcap(mcap_path: Path, options):
     rr.spawn(memory_limit=options['memory_limit'])
     # rr.send_blueprint(blueprint=options['initial_blueprint'])
     
-    print(f"Opening {mcap_path} for sequential streaming");
+    print(f"\r\nOpening {mcap_path} for sequential streaming");
 
     message_count = 0
     start_time = time.time()
-    play_all = options['play_all']
+    # play_all = options['play_all']
 
     with open(mcap_path, "rb") as f:
         reader = make_reader(f, decoder_factories=[DecoderFactory()])
@@ -337,10 +361,13 @@ async def stream_mcap(mcap_path: Path, options):
             static=True
         )
 
+        global app
         for schema, channel, msg, decoded_msg in reader.iter_decoded_messages():
-            await trio.sleep(0)
-            if should_exit:
+            if app['should_exit']:
                 break
+
+            # If pause is set, waits. Else, returns immediately
+            await app['pause_event'].wait()
 
             if schema is None: continue
 
@@ -360,11 +387,11 @@ async def stream_mcap(mcap_path: Path, options):
             message_count += 1
             if message_count % 10000 == 0:
                 elapsed = time.time() - start_time
-                print(f"Streamed {message_count} messages... ({elapsed:.2f}s elapsed)")
-                if not play_all and message_count % 20000 == 0:
-                    res = input("Stream paused. Do you want to continue? (q/Q to quit) ")
-                    if res.strip().lower() == "q":
-                        break
+                print(f"\r\nStreamed {message_count} messages... ({elapsed:.2f}s elapsed)")
+                # if not play_all and message_count % 20000 == 0:
+                #     res = input("Stream paused. Do you want to continue? (q/Q to quit) ")
+                #     if res.strip().lower() == "q":
+                #         break
 
 async def main():
     parser = argparse.ArgumentParser(description=SCRIPT_DESCRIPTION)
@@ -376,10 +403,10 @@ async def main():
         '-m', '--memory_limit', type=str, required=False, default="50%",
         help='Memory limit before rerun garbage collects the old messages'
     )
-    parser.add_argument(
-        '-a', '--play_all', action='store_true',
-        help='Play the whole mcap without pause'
-    )
+    # parser.add_argument(
+    #     '-a', '--play_all', action='store_true',
+    #     help='Play the whole mcap without pause'
+    # )
     parser.add_argument(
         '--header_timestamp', action='store_true',
         help='Use the message timestamp information instead of the log time in Ros'
@@ -389,7 +416,7 @@ async def main():
     #     help='Initial view to start the recording'
     # )
     parser.add_argument(
-        '--urdf', type=Path, required=False, default='../../../data/config/rosario_v2.urdf.xacro',
+        '--urdf', type=Path, required=False, default='../../../../data/config/rosario_v2.urdf.xacro',
         help='URDF file to use for the transforms'
     )
 
@@ -398,14 +425,14 @@ async def main():
     options = {}
 
     options['memory_limit'] = args.memory_limit
-    options['play_all'] = args.play_all
+    # options['play_all'] = args.play_all
     options['header_timestamp'] = args.header_timestamp
     # options['initial_blueprint'] = args.initial_blueprint
     options['urdf'] = args.urdf
 
     trio_token = trio.lowlevel.current_trio_token()
 
-    print("Starting stream")
+    print("\r\nStarting stream")
     async with trio.open_nursery() as nursery:
         nursery.start_soon(stream_mcap, args.bag_path, options)
         nursery.start_soon(handle_input)
@@ -413,8 +440,6 @@ async def main():
         await trio.to_thread.run_sync(
             run_listener, trio_token
         )
-
-    print("Exiting main")
 
 if __name__ == '__main__':
     trio.run(main)
