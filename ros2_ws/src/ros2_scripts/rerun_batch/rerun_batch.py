@@ -44,7 +44,7 @@ def toggle_blueprint():
     app['curr_blueprint'] = (app['curr_blueprint'] + 1) % len(app['blueprints'])
     rr.log_file_from_path(app['blueprints'][app['curr_blueprint']])
 
-class CursesStdoutRedirect:
+class CursesCombinedRedirect:
     """Class that handles the text redirected from stdout"""
     
     def __init__(self, log_path: Path = Path("output.log")):
@@ -52,13 +52,21 @@ class CursesStdoutRedirect:
         self.log_path = log_path
         self.buffer = []
 
-    def write(self, msg):
+    def write_stdout(self, msg):
         if msg:
             self.log_file.write(msg)
             self.log_file.flush()
 
-            lines = msg.splitlines()
-            for line in lines:
+            for line in msg.splitlines():
+                if line.strip() or line == "":
+                    self.buffer.append(line)
+
+    def write_stderr(self, msg):
+        if msg:
+            self.log_file.write(msg)
+            self.log_file.flush()
+
+            for line in msg.splitlines():
                 if line.strip() or line == "":
                     self.buffer.append(line)
 
@@ -67,8 +75,17 @@ class CursesStdoutRedirect:
 
     def close(self):
         self.log_file.close()
-        self.log_path.unlink(missing_ok=True)
-        
+        # self.log_path.unlink(missing_ok=True)
+
+class StdoutProxy:
+    def __init__(self, handler): self.handler = handler
+    def write(self, msg): self.handler.write_stdout(msg)
+    def flush(self): self.handler.flush()
+
+class StderrProxy:
+    def __init__(self, handler): self.handler = handler
+    def write(self, msg): self.handler.write_stderr(msg)
+    def flush(self): self.handler.flush()
 
 async def handle_input(stdscr, cancel_scope):
     """Handle the app input and stop the nursery on exit"""
@@ -98,8 +115,7 @@ async def draw_loop(stdscr, control_win, stdout_win, redirect):
     """Function that handles the display of information to screen"""
 
     while True:
-        height, width = stdscr.getmaxyx()
-        control_height, _ = control_win.getmaxyx()
+        _, width = stdscr.getmaxyx()
         stdout_height, _ = stdout_win.getmaxyx()
 
         # control window
@@ -112,7 +128,7 @@ async def draw_loop(stdscr, control_win, stdout_win, redirect):
         # stdout window
         stdout_win.erase()
         stdout_win.box()
-        stdout_win.addstr(0, 2, " Standard Output ", curses.A_BOLD)
+        stdout_win.addstr(0, 2, " Output ", curses.A_BOLD)
 
         max_visible_lines = stdout_height - 2
         visible_buffer = redirect.buffer[-max_visible_lines:]
@@ -147,9 +163,12 @@ async def run_curses(stdscr, bag_path: Path, options):
     stdout_win = curses.newwin(stdout_height, width, control_height, 0)
 
     # redirect stdout to logfile
-    redirect = CursesStdoutRedirect()
+    redirect = CursesCombinedRedirect()
     original_stdout = sys.stdout
-    sys.stdout = redirect
+    original_stderr = sys.stderr
+
+    sys.stdout = StdoutProxy(redirect)
+    sys.stderr = StderrProxy(redirect)
 
     try:
         with trio.CancelScope() as cancel_scope:
@@ -161,6 +180,7 @@ async def run_curses(stdscr, bag_path: Path, options):
 
     finally:
         sys.stdout = original_stdout
+        sys.stderr = original_stderr
         redirect.close()
 
 def get_time_diff(decoded_msg, curr_time: float | None) -> tuple[float, float]:
@@ -484,10 +504,7 @@ def main():
     app['pause_event'].set()
 
     print("Starting stream")
-    curses.wrapper(run_trio_inside_wrapper, args.bag_path, options)
-
-def run_trio_inside_wrapper(stdscr, bag_path: Path, options):
-    trio.run(run_curses, stdscr, bag_path, options)
+    curses.wrapper(lambda stdscr: trio.run(run_curses, stdscr, args.bag_path, options))
 
 if __name__ == '__main__':
     main()
