@@ -6,7 +6,6 @@ import argparse
 import trio
 import sys
 import curses
-import tty
 
 import numpy as np
 
@@ -31,7 +30,6 @@ image_stats = {
     "depth_image_count": 0,
 }
 
-# send_channel, receive_channel = trio.open_memory_channel(10)
 app = {
     "should_exit": False,
     "pause_event": trio.Event(),
@@ -40,11 +38,15 @@ app = {
 }
 
 def toggle_blueprint():
+    """Change between blueprints in the 'blueprint directory'"""
+
     global app
     app['curr_blueprint'] = (app['curr_blueprint'] + 1) % len(app['blueprints'])
     rr.log_file_from_path(app['blueprints'][app['curr_blueprint']])
 
 class CursesStdoutRedirect:
+    """Class that handles the text redirected from stdout"""
+    
     def __init__(self, log_path: Path = Path("output.log")):
         self.log_file = log_path.open("a", encoding="utf-8")
         self.log_path = log_path
@@ -69,6 +71,8 @@ class CursesStdoutRedirect:
         
 
 async def handle_input(stdscr, cancel_scope):
+    """Handle the app input and stop the nursery on exit"""
+
     while True:
         # doesnt block because of stdscr.nodelay(True)
         try:
@@ -91,6 +95,8 @@ async def handle_input(stdscr, cancel_scope):
         await trio.sleep(0.05)
 
 async def draw_loop(stdscr, control_win, stdout_win, redirect):
+    """Function that handles the display of information to screen"""
+
     while True:
         height, width = stdscr.getmaxyx()
         control_height, _ = control_win.getmaxyx()
@@ -124,6 +130,8 @@ async def draw_loop(stdscr, control_win, stdout_win, redirect):
 
 # sets up curses to handle input and display
 async def run_curses(stdscr, bag_path: Path, options):
+    """Set up curses and start the mcap streaming"""
+
     curses.curs_set(False)
     stdscr.nodelay(True)
     stdscr.clear()
@@ -156,6 +164,8 @@ async def run_curses(stdscr, bag_path: Path, options):
         redirect.close()
 
 def get_time_diff(decoded_msg, curr_time: float | None) -> tuple[float, float]:
+    """Utility function to get the frames per second"""
+
     if curr_time is None:
         curr_time = decoded_msg.header.stamp.sec + decoded_msg.header.stamp.nanosec * 1e-9
         return (0, curr_time)
@@ -214,7 +224,6 @@ def log_image(decoded_msg, channel):
         else:
             return
 
-
     rr.log(
         "stats/image_loss",
         rr.Scalars(scalars=[abs(image_stats['rgb_image_count'] - image_stats['depth_image_count'])])
@@ -243,18 +252,6 @@ def log_gnss(decoded_msg, channel):
     )
 
 def log_imu(decoded_msg, channel, options):
-    # rr.log(
-    #     channel.topic + "/angular_velocity",
-    #     rr.Arrows3D(
-    #         vectors=[
-    #             decoded_msg.angular_velocity.x,
-    #             decoded_msg.angular_velocity.y,
-    #             decoded_msg.angular_velocity.z,
-    #         ],
-    #         labels="Angular velocity"
-    #     )
-    # )
-
     match channel.topic:
         case "/reach_1/imu":
             t_baselink_imu = options['t/reach_imu1']
@@ -344,6 +341,8 @@ def log_odometry(decoded_msg, channel):
     )
 
 def set_time(options, decoded_msg, msg):
+    """Set the current time for the rerun timeline using message information"""
+
     time = msg.log_time
     if options['header_timestamp'] and hasattr(msg, 'header'):
         time = to_ns(decoded_msg.header.stamp)
@@ -354,8 +353,11 @@ def to_ns(stamp):
     return stamp.sec * int(1e9) + stamp.nanosec
 
 async def stream_mcap(mcap_path: Path, options):
+    """Loop that handles streaming the mcap into the rerun server"""
+
     from mcap.reader import make_reader
     from mcap_ros2.decoder import DecoderFactory
+
     rr.init("batch_example")
     rr.spawn(memory_limit=options['memory_limit'])
 
@@ -365,7 +367,6 @@ async def stream_mcap(mcap_path: Path, options):
 
     message_count = 0
     start_time = time.time()
-    # play_all = options['play_all']
 
     with open(mcap_path, "rb") as f:
         reader = make_reader(f, decoder_factories=[DecoderFactory()])
@@ -373,6 +374,7 @@ async def stream_mcap(mcap_path: Path, options):
         options['final_time'] = reader.get_summary().statistics.message_end_time
         options['time_diff'] = options['final_time'] - options['initial_time']
 
+        # Get robot transforms from input file
         doc = XacroDoc.from_file(options['urdf'])
         urdf_str = doc.to_urdf_string()
         utm = UrdfTransformManager()
@@ -393,6 +395,7 @@ async def stream_mcap(mcap_path: Path, options):
                     static=True
                 )
 
+        # Setup 'cameras' for the depth and color joint visualization
         rr.log(
             "/realsense/depth/image_rect_raw",
             rr.Pinhole(
@@ -444,10 +447,6 @@ async def stream_mcap(mcap_path: Path, options):
             if message_count % 10000 == 0:
                 elapsed = time.time() - start_time
                 print(f"Streamed {message_count} messages... ({elapsed:.2f}s elapsed)")
-                # if not play_all and message_count % 20000 == 0:
-                #     res = input("Stream paused. Do you want to continue? (q/Q to quit) ")
-                #     if res.strip().lower() == "q":
-                #         break
 
 def main():
     parser = argparse.ArgumentParser(description=SCRIPT_DESCRIPTION)
@@ -459,18 +458,10 @@ def main():
         '-m', '--memory_limit', type=str, required=False, default="50%",
         help='Memory limit before rerun garbage collects the old messages'
     )
-    # parser.add_argument(
-    #     '-a', '--play_all', action='store_true',
-    #     help='Play the whole mcap without pause'
-    # )
     parser.add_argument(
         '--header_timestamp', action='store_true',
         help='Use the message timestamp information instead of the log time in Ros'
     )
-    # parser.add_argument(
-    #     '-V', '--initial_blueprint', type=Path, required=False, default='./batch_blueprint.rbl',
-    #     help='Initial view to start the recording'
-    # )
     parser.add_argument(
         '--urdf', type=Path, required=False, default='../../../../data/config/rosario_v2.urdf.xacro',
         help='URDF file to use for the transforms'
@@ -485,9 +476,7 @@ def main():
     options = {}
 
     options['memory_limit'] = args.memory_limit
-    # options['play_all'] = args.play_all
     options['header_timestamp'] = args.header_timestamp
-    # options['initial_blueprint'] = args.initial_blueprint
     options['urdf'] = args.urdf
 
     global app
