@@ -5,7 +5,7 @@ import argparse
 
 import trio
 import sys
-import termios
+import curses
 import tty
 
 import numpy as np
@@ -20,6 +20,141 @@ SCRIPT_DESCRIPTION=\
 """This script allows the visualization of large mcap files in rerun by reading them sequentially
 """
 
+CONTROLS_DESCRIPTION=\
+"""Controls: 'q' to exit, 'p' to pause, 'c' to toggle blueprints.
+"""
+
+image_stats = {
+    "curr_rgb_time": 0.0,
+    "curr_depth_time": 0.0,
+    "rgb_image_count": 0,
+    "depth_image_count": 0,
+}
+
+# send_channel, receive_channel = trio.open_memory_channel(10)
+app = {
+    "should_exit": False,
+    "pause_event": trio.Event(),
+    "curr_blueprint": 0,
+    "blueprints": [],
+}
+
+def toggle_blueprint():
+    global app
+    app['curr_blueprint'] = (app['curr_blueprint'] + 1) % len(app['blueprints'])
+    rr.log_file_from_path(app['blueprints'][app['curr_blueprint']])
+
+class CursesStdoutRedirect:
+    def __init__(self, log_path: Path = Path("output.log")):
+        self.log_file = log_path.open("a", encoding="utf-8")
+        self.log_path = log_path
+        self.buffer = []
+
+    def write(self, msg):
+        if msg:
+            self.log_file.write(msg)
+            self.log_file.flush()
+
+            lines = msg.splitlines()
+            for line in lines:
+                if line.strip() or line == "":
+                    self.buffer.append(line)
+
+    def flush(self):
+        self.log_file.flush()
+
+    def close(self):
+        self.log_file.close()
+        self.log_path.unlink(missing_ok=True)
+        
+
+async def handle_input(stdscr, cancel_scope):
+    while True:
+        # doesnt block because of stdscr.nodelay(True)
+        try:
+            key = stdscr.getch()
+        except:
+            key = -1
+
+        if key == ord('q') or key == ord('Q'):
+            app['should_exit'] = True
+            cancel_scope.cancel() # Stop the nursery
+            return
+        elif key == ord('p'):
+            if app['pause_event'].is_set():
+                app['pause_event'] = trio.Event()
+            else:
+                app['pause_event'].set()
+        elif key == ord('c'):
+            toggle_blueprint()
+
+        await trio.sleep(0.05)
+
+async def draw_loop(stdscr, control_win, stdout_win, redirect):
+    while True:
+        height, width = stdscr.getmaxyx()
+        control_height, _ = control_win.getmaxyx()
+        stdout_height, _ = stdout_win.getmaxyx()
+
+        # control window
+        control_win.erase()
+        control_win.box()
+        control_win.addstr(1, 2, "CONTROLS", curses.A_BOLD)
+        control_win.addstr(2, 2, "Press 'p' to pause | Press 'c' to toggle blueprints | Press 'q' to exit")
+        control_win.noutrefresh()
+
+        # stdout window
+        stdout_win.erase()
+        stdout_win.box()
+        stdout_win.addstr(0, 2, " Standard Output ", curses.A_BOLD)
+
+        max_visible_lines = stdout_height - 2
+        visible_buffer = redirect.buffer[-max_visible_lines:]
+
+        for idx, line in enumerate(visible_buffer):
+            truncated_line = line[:width - 4]
+            stdout_win.addstr(idx + 1, 2, truncated_line)
+
+        stdout_win.noutrefresh()
+
+        # render both windows
+        curses.doupdate()
+
+        await trio.sleep(0.033)
+
+# sets up curses to handle input and display
+async def run_curses(stdscr, bag_path: Path, options):
+    curses.curs_set(False)
+    stdscr.nodelay(True)
+    stdscr.clear()
+
+    height, width = stdscr.getmaxyx()
+
+    # control window
+    control_height = 5
+    control_win = curses.newwin(control_height, width, 0, 0)
+
+    # stdout window
+    stdout_height = height - control_height
+    stdout_win = curses.newwin(stdout_height, width, control_height, 0)
+
+    # redirect stdout to logfile
+    redirect = CursesStdoutRedirect()
+    original_stdout = sys.stdout
+    sys.stdout = redirect
+
+    try:
+        with trio.CancelScope() as cancel_scope:
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(handle_input, stdscr, cancel_scope)
+                nursery.start_soon(draw_loop, stdscr, control_win, stdout_win, redirect)
+
+                nursery.start_soon(stream_mcap, bag_path, options)
+
+    finally:
+        sys.stdout = original_stdout
+        redirect.close()
+
 def get_time_diff(decoded_msg, curr_time: float | None) -> tuple[float, float]:
     if curr_time is None:
         curr_time = decoded_msg.header.stamp.sec + decoded_msg.header.stamp.nanosec * 1e-9
@@ -31,12 +166,6 @@ def get_time_diff(decoded_msg, curr_time: float | None) -> tuple[float, float]:
         return (1/elapsed, curr_time)
 
 
-image_stats = {
-    "curr_rgb_time": 0.0,
-    "curr_depth_time": 0.0,
-    "rgb_image_count": 0,
-    "depth_image_count": 0,
-}
 def log_image(decoded_msg, channel):
     global image_stats
 
@@ -224,79 +353,6 @@ def set_time(options, decoded_msg, msg):
 def to_ns(stamp):
     return stamp.sec * int(1e9) + stamp.nanosec
 
-send_channel, receive_channel = trio.open_memory_channel(10)
-app = {
-    "should_exit": False,
-    "pause_event": trio.Event(),
-    "curr_blueprint": 0,
-    "blueprints": [],
-}
-
-def toggle_blueprint():
-    global app
-    app['curr_blueprint'] = (app['curr_blueprint'] + 1) % len(app['blueprints'])
-    rr.log_file_from_path(app['blueprints'][app['curr_blueprint']])
-
-async def handle_input():
-    print("\r\nHandling input. Press q to quit")
-
-    global app
-    app['pause_event'].set()
-    global receive_channel
-    async with receive_channel:
-        async for key in receive_channel:
-            print(f"\r\nLatest key: {key}\r\n")
-            if key == 'q':
-                app['should_exit'] = True
-                app['pause_event'].set()
-                break
-            if key == 'p':
-                if app['pause_event'].is_set():
-                    app['pause_event'] = trio.Event()
-                else:
-                    app['pause_event'].set()
-            if key == 'c':
-                toggle_blueprint()
-
-    print("\r\nFinish handle_input")
-
-# catches the keys pressed
-def run_listener(trio_token):
-    global send_channel
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-
-    try:
-        tty.setraw(fd)
-        # print("Raw mode active. Press any key (q to exit)...", end="", flush=True)
-
-        while True:
-            key = sys.stdin.read(1)
-
-            try:
-                trio.from_thread.run_sync(
-                    send_channel.send_nowait,
-                    key,
-                    trio_token=trio_token
-                )
-            except trio.WouldBlock:
-                print("\r\nWould block: ignoring")
-                pass # ignore the input even if we couldn't handle it
-            except trio.RunFinishedError:
-                # Trio loop is done.
-                return False
-
-            try:
-                if key == "q":
-                    break
-            except:
-                pass
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    print("\r\nFinished listening")
-
 async def stream_mcap(mcap_path: Path, options):
     from mcap.reader import make_reader
     from mcap_ros2.decoder import DecoderFactory
@@ -305,7 +361,7 @@ async def stream_mcap(mcap_path: Path, options):
 
     toggle_blueprint()
     
-    print(f"\r\nOpening {mcap_path} for sequential streaming");
+    print(f"Opening {mcap_path} for sequential streaming");
 
     message_count = 0
     start_time = time.time()
@@ -358,7 +414,11 @@ async def stream_mcap(mcap_path: Path, options):
         )
 
         global app
-        for schema, channel, msg, decoded_msg in reader.iter_decoded_messages():
+        app['streamer'] = reader.iter_decoded_messages()
+
+        while True:
+            schema, channel, msg, decoded_msg = next(app['streamer'])
+            
             if app['should_exit']:
                 break
 
@@ -383,13 +443,13 @@ async def stream_mcap(mcap_path: Path, options):
             message_count += 1
             if message_count % 10000 == 0:
                 elapsed = time.time() - start_time
-                print(f"\r\nStreamed {message_count} messages... ({elapsed:.2f}s elapsed)")
+                print(f"Streamed {message_count} messages... ({elapsed:.2f}s elapsed)")
                 # if not play_all and message_count % 20000 == 0:
                 #     res = input("Stream paused. Do you want to continue? (q/Q to quit) ")
                 #     if res.strip().lower() == "q":
                 #         break
 
-async def main():
+def main():
     parser = argparse.ArgumentParser(description=SCRIPT_DESCRIPTION)
     parser.add_argument(
         '-b', '--bag_path', type=Path, required=True,
@@ -432,17 +492,13 @@ async def main():
 
     global app
     app['blueprints'] = [str(file) for file in args.blueprints.iterdir() if file.is_file()]
+    app['pause_event'].set()
 
-    trio_token = trio.lowlevel.current_trio_token()
+    print("Starting stream")
+    curses.wrapper(run_trio_inside_wrapper, args.bag_path, options)
 
-    print("\r\nStarting stream")
-    async with trio.open_nursery() as nursery:
-        nursery.start_soon(stream_mcap, args.bag_path, options)
-        nursery.start_soon(handle_input)
-
-        await trio.to_thread.run_sync(
-            run_listener, trio_token
-        )
+def run_trio_inside_wrapper(stdscr, bag_path: Path, options):
+    trio.run(run_curses, stdscr, bag_path, options)
 
 if __name__ == '__main__':
-    trio.run(main)
+    main()
