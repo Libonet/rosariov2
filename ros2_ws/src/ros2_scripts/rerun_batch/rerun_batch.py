@@ -1,14 +1,20 @@
+from collections import deque
 from pathlib import Path
 import time
+import re
 import rerun as rr
 import argparse
+import subprocess
 
 import trio
 import sys
 import curses
+from curses import textpad
 
 import numpy as np
 
+from mcap.reader import make_reader
+from mcap_ros2.decoder import DecoderFactory
 from xacrodoc import XacroDoc
 from pytransform3d.urdf import UrdfTransformManager
 from scipy.spatial.transform import Rotation
@@ -47,10 +53,10 @@ def toggle_blueprint():
 class CursesCombinedRedirect:
     """Class that handles the text redirected from stdout"""
     
-    def __init__(self, log_path: Path = Path("output.log")):
+    def __init__(self, buffsize, log_path: Path = Path("output.log")):
         self.log_file = log_path.open("a", encoding="utf-8")
         self.log_path = log_path
-        self.buffer = []
+        self.buffer = deque(maxlen=buffsize)
 
     def write_stdout(self, msg):
         if msg:
@@ -87,6 +93,13 @@ class StderrProxy:
     def write(self, msg): self.handler.write_stderr(msg)
     def flush(self): self.handler.flush()
 
+async def recording_offset_time(secs: int):
+    global image_stats
+    global app
+
+    start_time = image_stats['curr_rgb_time'] + secs
+    app['streamer'] = app['reader'].iter_decoded_messages(start_time=start_time)
+
 async def handle_input(stdscr, cancel_scope):
     """Handle the app input and stop the nursery on exit"""
 
@@ -108,10 +121,28 @@ async def handle_input(stdscr, cancel_scope):
                 app['pause_event'].set()
         elif key == ord('c'):
             toggle_blueprint()
+        elif key == curses.KEY_LEFT:
+            recording_offset_time(-10)
+        elif key == curses.KEY_RIGHT:
+            recording_offset_time(+10)
+        elif key == ord('t'):
+            txtbox = textpad.Textbox(stdscr)
+
+            time_offset = txtbox.edit()
+            try:
+                time_offset = int(time_offset)
+            except ValueError:
+                continue
+
+            recording_offset_time(time_offset)
 
         await trio.sleep(0.05)
 
-async def draw_loop(stdscr, control_win, stdout_win, redirect):
+def remove_ansi_escape_codes(text):
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
+
+async def draw_loop(stdscr, control_win, stdout_win, redirect: CursesCombinedRedirect):
     """Function that handles the display of information to screen"""
 
     while True:
@@ -131,11 +162,21 @@ async def draw_loop(stdscr, control_win, stdout_win, redirect):
         stdout_win.addstr(0, 2, " Output ", curses.A_BOLD)
 
         max_visible_lines = stdout_height - 2
-        visible_buffer = redirect.buffer[-max_visible_lines:]
+        # visible_buffer = redirect.buffer[-max_visible_lines:]
 
-        for idx, line in enumerate(visible_buffer):
-            truncated_line = line[:width - 4]
-            stdout_win.addstr(idx + 1, 2, truncated_line)
+        idx = 0
+        for line in redirect.buffer:
+            # truncated_line = line[:width - 4]
+            for i in range(0, len(line), width-4):
+                if idx >= max_visible_lines:
+                    break
+                chunk = line[i:i+width-4] 
+                stdout_win.addstr(idx + 1, 2, chunk)
+                idx += 1
+
+            if idx >= max_visible_lines:
+                break
+
 
         stdout_win.noutrefresh()
 
@@ -144,11 +185,27 @@ async def draw_loop(stdscr, control_win, stdout_win, redirect):
 
         await trio.sleep(0.033)
 
+async def capture_process_stdout(process, redirect: CursesCombinedRedirect):
+    p_stdout = process.stdout
+    while True:
+        msg = await p_stdout.receive_some()
+        # print(f"Received a message from child process stdout!!!: {msg.decode("utf-8")}")
+        redirect.write_stdout(msg.decode("utf-8"))
+
+async def capture_process_stderr(process, redirect: CursesCombinedRedirect):
+    p_stderr = process.stderr
+    while True:
+        msg = await p_stderr.receive_some()
+        text = msg.decode("utf-8")
+        clean_text = remove_ansi_escape_codes(text)
+        # print(f"Received a message from child process stderr!!!: {msg.decode("utf-8")}")
+        redirect.write_stderr(clean_text + '\n')
+
 # sets up curses to handle input and display
 async def run_curses(stdscr, bag_path: Path, options):
     """Set up curses and start the mcap streaming"""
 
-    curses.curs_set(False)
+    curses.curs_set(False) # No cursor
     stdscr.nodelay(True)
     stdscr.clear()
 
@@ -161,9 +218,10 @@ async def run_curses(stdscr, bag_path: Path, options):
     # stdout window
     stdout_height = height - control_height
     stdout_win = curses.newwin(stdout_height, width, control_height, 0)
+    max_visible_lines = stdout_height - 2
 
-    # redirect stdout to logfile
-    redirect = CursesCombinedRedirect()
+    # redirect stdout to logfile 
+    redirect = CursesCombinedRedirect(max_visible_lines)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
 
@@ -176,7 +234,11 @@ async def run_curses(stdscr, bag_path: Path, options):
                 nursery.start_soon(handle_input, stdscr, cancel_scope)
                 nursery.start_soon(draw_loop, stdscr, control_win, stdout_win, redirect)
 
+                process = await trio.lowlevel.open_process("python3 init_rerun.py " + options['memory_limit'],\
+                        shell=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
                 nursery.start_soon(stream_mcap, bag_path, options)
+                nursery.start_soon(capture_process_stdout, process, redirect)
+                nursery.start_soon(capture_process_stderr, process, redirect)
 
     finally:
         sys.stdout = original_stdout
@@ -235,6 +297,7 @@ def log_image(decoded_msg, channel):
             
             # Log FPS
             (fps, time) = get_time_diff(decoded_msg, image_stats['curr_rgb_time'])
+            # print(f"curr_rgb_time = {time}")
             image_stats['curr_rgb_time'] = time
 
             rr.log('/stats/fps/color', rr.Scalars(scalars=[fps]))
@@ -375,11 +438,11 @@ def to_ns(stamp):
 async def stream_mcap(mcap_path: Path, options):
     """Loop that handles streaming the mcap into the rerun server"""
 
-    from mcap.reader import make_reader
-    from mcap_ros2.decoder import DecoderFactory
+    # await trio.sleep(0.1)
 
     rr.init("batch_example")
-    rr.spawn(memory_limit=options['memory_limit'])
+    # rr.spawn(memory_limit=options['memory_limit'])
+    rr.connect_grpc()
 
     toggle_blueprint()
     
@@ -389,7 +452,9 @@ async def stream_mcap(mcap_path: Path, options):
     start_time = time.time()
 
     with open(mcap_path, "rb") as f:
+        global app
         reader = make_reader(f, decoder_factories=[DecoderFactory()])
+        app['reader'] = reader
         options['initial_time'] = reader.get_summary().statistics.message_start_time
         options['final_time'] = reader.get_summary().statistics.message_end_time
         options['time_diff'] = options['final_time'] - options['initial_time']
@@ -436,7 +501,6 @@ async def stream_mcap(mcap_path: Path, options):
             static=True
         )
 
-        global app
         app['streamer'] = reader.iter_decoded_messages()
 
         while True:
@@ -464,7 +528,7 @@ async def stream_mcap(mcap_path: Path, options):
                     continue
 
             message_count += 1
-            if message_count % 10000 == 0:
+            if message_count % 5000 == 0:
                 elapsed = time.time() - start_time
                 print(f"Streamed {message_count} messages... ({elapsed:.2f}s elapsed)")
 
